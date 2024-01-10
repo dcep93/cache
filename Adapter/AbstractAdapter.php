@@ -41,49 +41,53 @@ abstract class AbstractAdapter implements AdapterInterface, LoggerAwareInterface
      * @param string $namespace
      * @param int    $defaultLifetime
      */
-    protected function __construct($namespace = '', $defaultLifetime = 0)
+     protected function __construct(string $namespace = '', int $defaultLifetime = 0)
     {
         $this->namespace = '' === $namespace ? '' : CacheItem::validateKey($namespace).static::NS_SEPARATOR;
         if (null !== $this->maxIdLength && \strlen($namespace) > $this->maxIdLength - 24) {
             throw new InvalidArgumentException(sprintf('Namespace must be %d chars max, %d given ("%s").', $this->maxIdLength - 24, \strlen($namespace), $namespace));
         }
-        $this->createCacheItem = \Closure::bind(
-            static function ($key, $value, $isHit) {
-                $item = new CacheItem();
-                $item->key = $key;
-                $item->value = $value;
-                $item->isHit = $isHit;
-
-                return $item;
-            },
-            null,
-            CacheItem::class
-        );
-        $getId = function ($key) { return $this->getId((string) $key); };
-        $this->mergeByLifetime = \Closure::bind(
-            static function ($deferred, $namespace, &$expiredIds) use ($getId, $defaultLifetime) {
-                $byLifetime = [];
-                $now = time();
-                $expiredIds = [];
-
-                foreach ($deferred as $key => $item) {
-                    if (null === $item->expiry) {
-                        $byLifetime[0 < $defaultLifetime ? $defaultLifetime : 0][$getId($key)] = $item->value;
-                    } elseif (0 === $item->expiry) {
-                        $byLifetime[0][$getId($key)] = $item->value;
-                    } elseif ($item->expiry > $now) {
-                        $byLifetime[$item->expiry - $now][$getId($key)] = $item->value;
-                    } else {
-                        $expiredIds[] = $getId($key);
-                    }
-                }
-
-                return $byLifetime;
-            },
-            null,
-            CacheItem::class
-        );
+        self::initializeCreateCacheItem();
+        self::initializeMergeByLifetime();
     }
+
+    private static function initializeCreateCacheItem()
+    {
+        self::$createCacheItem ??= static function ($key, $value, $isHit) {
+            $item = new CacheItem();
+            $item->key = $key;
+            $item->value = $value;
+            $item->isHit = $isHit;
+            $item->unpack();
+
+            return $item;
+        };
+    }
+
+    private static function initializeMergeByLifetime()
+    {
+        self::$mergeByLifetime ??= static function ($deferred, $namespace, &$expiredIds, $getId, $defaultLifetime) {
+            $byLifetime = [];
+            $now = microtime(true);
+            $expiredIds = [];
+
+            foreach ($deferred as $key => $item) {
+                $key = (string) $key;
+                if (null === $item->expiry) {
+                    $ttl = 0 < $defaultLifetime ? $defaultLifetime : 0;
+                } elseif (!$item->expiry) {
+                    $ttl = 0;
+                } elseif (0 >= $ttl = (int) (0.1 + $item->expiry - $now)) {
+                    $expiredIds[] = $getId($key);
+                    continue;
+                }
+                $byLifetime[$ttl][$getId($key)] = $item->pack();
+            }
+
+            return $byLifetime;
+        };
+    }
+
 
     /**
      * @param string $namespace
